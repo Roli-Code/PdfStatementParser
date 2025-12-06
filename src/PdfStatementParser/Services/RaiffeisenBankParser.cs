@@ -37,6 +37,53 @@ namespace PdfStatementParser.Services
         /// <summary>
         /// Parse PDF content bytes into a <see cref="Statement"/> for this bank.
         /// </summary>
+        private readonly ITextCleaner _textCleaner;
+
+        public RaiffeisenBankParser() : this(new TextCleaner()) { }
+
+        public RaiffeisenBankParser(ITextCleaner? textCleaner)
+        {
+            _textCleaner = textCleaner ?? new TextCleaner();
+        }
+
+        // Mutable helper used during parsing to collect fragments before creating immutable Booking
+        private class BookingBuilder
+        {
+            public DateTime? BookingDate { get; set; }
+            public DateTime? ValueDate { get; set; }
+            public string BookingText { get; set; } = string.Empty;
+            public string Applicant { get; set; } = string.Empty;
+            public List<string> PurposeFragments { get; } = new();
+            public decimal? Amount { get; set; }
+            public string Currency { get; set; } = "EUR";
+            public decimal? Balance { get; set; }
+            public string? TransactionNumber { get; set; }
+            public string? Memo { get; set; }
+
+            public void AppendPurpose(string s)
+            {
+                if (string.IsNullOrWhiteSpace(s)) return;
+                if (!PurposeFragments.Contains(s)) PurposeFragments.Add(s);
+            }
+
+            public Booking Build()
+            {
+                return new Booking
+                {
+                    BookingDate = BookingDate ?? default,
+                    ValueDate = ValueDate,
+                    BookingText = BookingText ?? string.Empty,
+                    Applicant = Applicant ?? string.Empty,
+                    Purpose = string.Join(" ", PurposeFragments),
+                    Amount = Amount ?? 0m,
+                    Currency = Currency ?? "EUR",
+                    Balance = Balance,
+                    TransactionNumber = TransactionNumber,
+                    Memo = Memo
+                };
+            }
+        }
+
         public override async Task<Statement?> ParseContentAsync(byte[] content, string? fileName)
         {
             try
@@ -81,16 +128,20 @@ namespace PdfStatementParser.Services
 
         internal Statement? ParseStatementFromText(string text)
         {
-            var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
                 .Select(l => l.Trim()).ToArray();
 
-            var statement = new Statement
-            {
-                BankIdentifier = BankIdentifier,
-                Currency = "EUR",
-                Bookings = new List<Booking>(),
-                Metadata = new ParseMetadata { ParserVersion = "1.0" }
-            };
+            // mutable collectors (we'll create the immutable Statement at the end)
+            var collectedIban = string.Empty;
+            var collectedAccountHolder = string.Empty;
+            var collectedBankName = string.Empty;
+            var collectedStatementNumber = string.Empty;
+            DateTime collectedStartDate = default;
+            DateTime collectedEndDate = default;
+            decimal collectedOpeningBalance = 0m;
+            decimal collectedClosingBalance = 0m;
+            var bookings = new List<Booking>();
+            var metadata = new ParseMetadata { ParserVersion = "1.0", ParsedAt = DateTime.UtcNow };
 
                 // extract IBAN and balances using patterns
                 var ibanRegex = new Regex(@"DE\s*\d{2}\s*\d{4}\s*\d{4}\s*\d{4}\s*\d{4}\s*\d{2}", RegexOptions.IgnoreCase);
@@ -99,49 +150,26 @@ namespace PdfStatementParser.Services
                 var amountRegex = new Regex(@"\d{1,3}(?:\.\d{3})*,\d{2}");
                 var startDateRegex = new Regex(@"erstellt am\s*(\d{1,2}\.\d{1,2}\.\d{4})", RegexOptions.IgnoreCase);
             // Helper: detect footer-like lines (short numeric ids, page markers, or known footer tokens)
-            bool IsFooterLine(string s)
-            {
-                if (string.IsNullOrWhiteSpace(s)) return true;
-                var trimmed = s.Trim();
-                if (trimmed.Length < 4 && Regex.IsMatch(trimmed, "^\\d{1,4}$")) return true;
-                if (trimmed.StartsWith("K000", StringComparison.OrdinalIgnoreCase)) return true;
-                if (trimmed.Equals("1994") || trimmed.Equals("001") || trimmed.Equals("5M") ) return true;
-                // tokens like '1994 001 K00004147' are common footer sequences
-                if (Regex.IsMatch(trimmed, @"^(?:\d{2,6}(?:\s+\d{1,6}){0,4}|K\d{3,})$")) return true;
-                return false;
-            }
-
-            string CleanLine(string s)
-            {
-                if (string.IsNullOrWhiteSpace(s)) return s;
-                // remove page-transfer markers which sometimes appear mid-details
-                s = Regex.Replace(s, "\\bUebertrag auf Blatt\\b", "", RegexOptions.IgnoreCase);
-                s = Regex.Replace(s, "\\bUebertrag von Blatt\\b", "", RegexOptions.IgnoreCase);
-                s = Regex.Replace(s, "\\bÜbertrag auf Blatt\\b", "", RegexOptions.IgnoreCase);
-                s = Regex.Replace(s, "\\bÜbertrag von Blatt\\b", "", RegexOptions.IgnoreCase);
-                s = s.Replace("\u2500", ""); // remove box-drawing dashes
-                // remove explicit page markers that sometimes appear in the middle of details
-                s = s.Replace("--- Page", "");
-                if (s.Contains("www.")) return string.Empty;
-                return s.Trim();
-            }
+                // use injected cleaner
+                bool IsFooterLine(string s) => _textCleaner.IsFooterLine(s);
+                string CleanLine(string s) => _textCleaner.CleanLine(s);
 
             for (int i = 0; i < lines.Length; i++)
             {
                 var l = lines[i];
-                if (string.IsNullOrEmpty(statement.Iban))
+                if (string.IsNullOrEmpty(collectedIban))
                 {
                     var m = ibanRegex.Match(l);
                     if (!m.Success) m = compactIban.Match(l);
                     if (m.Success)
-                        statement.Iban = Regex.Replace(m.Value, "\\s+", "");
+                    collectedIban = Regex.Replace(m.Value, "\\s+", "");
                 }
 
                 var sd = startDateRegex.Match(l);
                 if (sd.Success && DateTime.TryParseExact(sd.Groups[1].Value, "d.M.yyyy", CultureInfo.GetCultureInfo("de-DE"), DateTimeStyles.None, out var created))
                 {
-                    statement.Metadata.ParsedAt = DateTime.UtcNow;
-                    statement.StartDate = created;
+                    metadata.ParsedAt = DateTime.UtcNow;
+                    collectedStartDate = created;
                 }
 
                 // opening/closing balances and their dates
@@ -159,11 +187,11 @@ namespace PdfStatementParser.Services
                             DateTime parsedDate;
                             if (l.ToLower().Contains("alter kontostand"))
                             {
-                                statement.OpeningBalance = v;
+                                collectedOpeningBalance = v;
                                 if (dmatch.Success && DateTime.TryParseExact(dmatch.Groups[1].Value, "d.M.yyyy", CultureInfo.GetCultureInfo("de-DE"), DateTimeStyles.None, out parsedDate))
                                 {
                                     // use the opening-balance date as the statement start date (more authoritative)
-                                    statement.StartDate = parsedDate;
+                                    collectedStartDate = parsedDate;
                                 }
                                 else
                                 {
@@ -171,17 +199,17 @@ namespace PdfStatementParser.Services
                                     var anyDate = Regex.Match(l, "\\d{1,2}\\.\\d{1,2}\\.\\d{4}");
                                     if (anyDate.Success && DateTime.TryParseExact(anyDate.Value, "d.M.yyyy", CultureInfo.GetCultureInfo("de-DE"), DateTimeStyles.None, out parsedDate))
                                     {
-                                        statement.StartDate = parsedDate;
+                                        collectedStartDate = parsedDate;
                                     }
                                 }
                             }
                             else
                             {
-                                statement.ClosingBalance = v;
+                                collectedClosingBalance = v;
                                 if (dmatch.Success && DateTime.TryParseExact(dmatch.Groups[1].Value, "d.M.yyyy", CultureInfo.GetCultureInfo("de-DE"), DateTimeStyles.None, out parsedDate))
                                 {
                                     // set end date for the statement
-                                    statement.EndDate = parsedDate;
+                                    collectedEndDate = parsedDate;
                                 }
                             }
                         }
@@ -193,7 +221,9 @@ namespace PdfStatementParser.Services
             var simpleDate = new Regex(@"^\d{1,2}\.\d{1,2}\.");
                 var amountWithSH = new Regex(@"(?<!\w)(?<amount>\d{1,3}(?:[\.\s]\d{3})*,\d{2})\s*(?<sh>[SH])\b", RegexOptions.IgnoreCase);
 
-            Booking? lastBooking = null;
+            // use mutable builders while parsing, convert to immutable Booking instances at the end
+            var bookingBuilders = new List<BookingBuilder>();
+            BookingBuilder? lastBuilder = null;
 
             for (int i = 0; i < lines.Length; i++)
             {
@@ -214,23 +244,22 @@ namespace PdfStatementParser.Services
                 if (!simpleDate.IsMatch(line))
                 {
                     // continuation line: append to previous booking's purpose if available, avoid duplicates
-                    if (lastBooking != null && !string.IsNullOrWhiteSpace(line))
+                    if (lastBuilder != null && !string.IsNullOrWhiteSpace(line))
                     {
-                        if (lastBooking.Purpose == null) lastBooking.Purpose = line;
-                        else if (!lastBooking.Purpose.Contains(line)) lastBooking.Purpose += " " + line;
+                        lastBuilder.AppendPurpose(line);
                     }
                     continue;
                 }
 
                 // If we reach here, line starts with a date -> start a new booking candidate
-                var booking = new Booking { Currency = "EUR" };
+                var builder = new BookingBuilder { Currency = "EUR" };
 
                 // parse booking date (first token like d.M.)
                 var firstToken = line.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
                 if (DateTime.TryParseExact(firstToken, new[] { "d.M.", "dd.MM." }, CultureInfo.GetCultureInfo("de-DE"), DateTimeStyles.None, out var dd))
                 {
-                    int year = (statement.StartDate != default) ? statement.StartDate.Year : DateTime.Now.Year;
-                    booking.BookingDate = new DateTime(year, dd.Month, dd.Day);
+                    int year = (collectedStartDate != default) ? collectedStartDate.Year : DateTime.Now.Year;
+                    builder.BookingDate = new DateTime(year, dd.Month, dd.Day);
                 }
 
                 // try to extract amount that is explicitly marked with S/H
@@ -296,9 +325,12 @@ namespace PdfStatementParser.Services
                 {
                     // set applicant to first meaningful detail, but avoid setting numeric/footer tokens
                     var first = details.First();
-                    if (!IsFooterLine(first)) booking.Applicant = first;
+                    if (!IsFooterLine(first)) builder.Applicant = first;
                     var rest = details.Skip(1).Where(d => !IsFooterLine(d)).ToArray();
-                    if (rest.Any()) booking.Purpose = string.Join(" ", rest);
+                    if (rest.Any())
+                    {
+                        foreach (var r in rest) builder.AppendPurpose(r);
+                    }
                 }
 
                 // if amount looks suspiciously large, try to find a smaller amount in details
@@ -318,17 +350,23 @@ namespace PdfStatementParser.Services
                 // only add booking if we found a reasonable amount or at least an applicant/purpose
                 if (parsedAmount.HasValue && Math.Abs(parsedAmount.Value) < 100000000m)
                 {
-                    booking.Amount = parsedAmount.Value;
-                    statement.Bookings.Add(booking);
-                    lastBooking = booking;
+                    builder.Amount = parsedAmount.Value;
+                    bookingBuilders.Add(builder);
+                    lastBuilder = builder;
                 }
-                else if (!string.IsNullOrWhiteSpace(booking.Applicant) || !string.IsNullOrWhiteSpace(booking.Purpose))
+                else if (!string.IsNullOrWhiteSpace(builder.Applicant) || builder.PurposeFragments.Any())
                 {
                     // If no amount but we have applicant/purpose, append as continuation to last booking instead
-                    if (lastBooking != null)
+                    if (lastBuilder != null)
                     {
-                        if (!string.IsNullOrWhiteSpace(booking.Applicant)) lastBooking.Purpose = (lastBooking.Purpose ?? "") + " " + booking.Applicant;
-                        if (!string.IsNullOrWhiteSpace(booking.Purpose)) lastBooking.Purpose = (lastBooking.Purpose ?? "") + " " + booking.Purpose;
+                        if (!string.IsNullOrWhiteSpace(builder.Applicant)) lastBuilder.AppendPurpose(builder.Applicant);
+                        if (builder.PurposeFragments.Any()) foreach (var p in builder.PurposeFragments) lastBuilder.AppendPurpose(p);
+                    }
+                    else
+                    {
+                        // no last booking to append to; create a builder anyway so info isn't lost
+                        bookingBuilders.Add(builder);
+                        lastBuilder = builder;
                     }
                 }
                 else
@@ -337,6 +375,26 @@ namespace PdfStatementParser.Services
                     continue;
                 }
             }
+
+            // finalize bookings
+            var finalBookings = bookingBuilders.Select(b => b.Build()).ToList();
+
+            // construct immutable statement
+            var statement = new Statement
+            {
+                Iban = collectedIban,
+                AccountHolder = collectedAccountHolder,
+                BankName = collectedBankName,
+                StatementNumber = collectedStatementNumber,
+                StartDate = collectedStartDate,
+                EndDate = collectedEndDate,
+                OpeningBalance = collectedOpeningBalance,
+                ClosingBalance = collectedClosingBalance,
+                Currency = "EUR",
+                Bookings = finalBookings,
+                BankIdentifier = BankIdentifier,
+                Metadata = metadata
+            };
 
             return statement;
         }
