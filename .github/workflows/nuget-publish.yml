@@ -1,0 +1,48 @@
+name: Publish NuGet package
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-test-pack-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build src/PdfStatementParser/PdfStatementParser.csproj -c Release --no-restore
+
+      - name: Run tests
+        run: dotnet test tests/PdfStatementParser.Tests/PdfStatementParser.Tests.csproj -c Release --no-build --verbosity normal
+
+      - name: Determine version from tag
+        id: version
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          VERSION=${TAG#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Pack
+        run: |
+          mkdir -p ./artifacts
+          dotnet pack src/PdfStatementParser/PdfStatementParser.csproj -c Release -o ./artifacts /p:PackageVersion=${{ steps.version.outputs.version }} /p:IncludeSymbols=true /p:SymbolPackageFormat=snupkg
+
+      - name: Publish to nuget.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          echo "Artifacts:"
+          ls -la ./artifacts || true
+          dotnet nuget push "./artifacts/*.nupkg" -k $NUGET_API_KEY -s https://api.nuget.org/v3/index.json --skip-duplicate
+          dotnet nuget push "./artifacts/*.snupkg" -k $NUGET_API_KEY -s https://api.nuget.org/v3/index.json --skip-duplicate

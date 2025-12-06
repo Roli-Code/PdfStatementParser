@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    
+    <!-- NuGet Package Information -->
+    <PackageId>PdfStatementParser</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Your Name</Authors>
+    <Description>A .NET library for parsing PDF statements</Description>
+    <PackageDescription>A comprehensive .NET library for parsing and extracting data from PDF statements</PackageDescription>
+    <PackageTags>pdf;parser;statement;nuget</PackageTags>
+    <PackageProjectUrl>https://github.com/donhauro/PdfStatementParser</PackageProjectUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/donhauro/PdfStatementParser</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    
+    <!-- Build Settings -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <!-- NuGet Package References -->
+  <ItemGroup>
+    <!-- Add your NuGet dependencies here -->
+    <!-- Example: <PackageReference Include="iTextSharp" Version="5.5.13.3" /> -->
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="itext7" Version="7.2.5" />
+  </ItemGroup>
+
+</Project>
